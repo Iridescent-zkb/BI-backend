@@ -1,20 +1,15 @@
 package com.sunshine.springbootinit.model.dto.chart;
 
-import com.sunshine.springbootinit.common.PageRequest;
 import lombok.Data;
-import lombok.EqualsAndHashCode;
 
 import java.io.Serializable;
 
 /**
- * 查询请求
+ * 智能分析
  * 
  */
-@EqualsAndHashCode(callSuper = true)
 @Data
-public class ChartQueryRequest extends PageRequest implements Serializable {
-
-    private Long id;
+public class GenChartByAiRequest implements Serializable {
 
     /**
      * 图表名称
@@ -26,15 +21,11 @@ public class ChartQueryRequest extends PageRequest implements Serializable {
      */
     private String goal;
 
+
     /**
      * 图表类型
      */
     private String chartType;
-
-    /**
-     * 用户 id
-     */
-    private Long userId;
 
     private static final long serialVersionUID = 1L;
 }
