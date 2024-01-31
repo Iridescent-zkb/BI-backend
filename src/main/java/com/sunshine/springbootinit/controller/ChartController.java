@@ -1,5 +1,6 @@
 package com.sunshine.springbootinit.controller;
 
+import cn.hutool.core.io.FileUtil;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.google.gson.Gson;
@@ -35,6 +36,9 @@ import org.springframework.web.multipart.MultipartFile;
 import javax.annotation.Resource;
 import javax.servlet.http.HttpServletRequest;
 import java.io.File;
+import java.lang.reflect.Array;
+import java.util.Arrays;
+import java.util.List;
 
 /**
  * 图表接口
@@ -237,6 +241,36 @@ public class ChartController {
         ThrowUtils.throwIf(StringUtils.isBlank(goal), ErrorCode.PARAMS_ERROR, "目标为空");
         // 如果名称不为空，并且名称长度大于100，就抛出异常，并给出提示
         ThrowUtils.throwIf(StringUtils.isNotBlank(name) && name.length() > 100, ErrorCode.PARAMS_ERROR, "名称过长");
+        /**
+         * 检验文件
+         *
+         * 首次，拿到用户请求的文件；
+         * 取到原始文件大小
+         */
+        long size = multipartFile.getSize();
+        //取到原始文件名
+        String originalFilename = multipartFile.getOriginalFilename();
+        /**
+         * 校验文件大小
+         *
+         * 定义一个常量表示1MB;
+         * 一兆(1MB) = 1024 * 1024 字节(Byte) = 2的20次方字节
+         */
+        final long ONE_MB = 1024 * 1024L;
+        // 如果文件大小,大于一兆,就抛出异常,并提示文件超过1M
+        ThrowUtils.throwIf(size > ONE_MB, ErrorCode.PARAMS_ERROR, "文件超过 1M");
+
+        /**
+         * 校验文件后缀(一般文件是aaa.png,我们要取到.<点>后面的内容)
+         *
+         * 利用FileUtil工具类中的getSuffix方法获取文件后缀名(例如:aaa.png,suffix应该保存为png)
+         */
+        String suffix = FileUtil.getSuffix(originalFilename);
+        //定义合法的后缀列表
+        final List<String> validFileSuffixList = Arrays.asList("png", "jpg", "svg", "webp", "jpeg");
+        // 如果suffix的后缀不在List的范围内,抛出异常,并提示'文件后缀非法'
+        ThrowUtils.throwIf(!validFileSuffixList.contains(suffix),ErrorCode.PARAMS_ERROR, "文件后缀非法");
+
         // 通过response对象拿到用户id(必须登录才能使用)
         User loginUser = userService.getLoginUser(request);
 
