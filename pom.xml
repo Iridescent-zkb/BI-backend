@@ -18,6 +18,12 @@
     </properties>
     <dependencies>
 
+        <!--修改version为最新稳定版-->
+        <dependency>
+            <groupId>io.github.briqt</groupId>
+            <artifactId>xunfei-spark4j</artifactId>
+            <version>1.1.2</version>
+        </dependency>
 
         <dependency>
             <groupId>com.yucongming</groupId>
