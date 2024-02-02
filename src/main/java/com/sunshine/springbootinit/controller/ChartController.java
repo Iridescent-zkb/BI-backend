@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.google.gson.Gson;
 import com.sunshine.springbootinit.annotation.AuthCheck;
+import com.sunshine.springbootinit.bizmq.BiMessageProducer;
 import com.sunshine.springbootinit.common.BaseResponse;
 import com.sunshine.springbootinit.common.DeleteRequest;
 import com.sunshine.springbootinit.common.ErrorCode;
@@ -67,8 +68,10 @@ public class ChartController {
     @Resource
     private ThreadPoolExecutor threadPoolExecutor;
 
+    @Resource
+    private BiMessageProducer biMessageProducer;
 
-    private final static Gson GSON = new Gson();
+
 
 
 
@@ -232,7 +235,7 @@ public class ChartController {
     }
 
     /**
-     *   智能分析
+     *   智能分析(同步)
      *
      * @param multipartFile
      * @param genChartByAiRequest
@@ -355,11 +358,13 @@ public class ChartController {
         return ResultUtils.success(biResponse);
     }
 
-    //1 给 chart 表新增任务状态字段（比如排队中、执行中、已完成、失败），任务执行信息字段（用于记录任务执行中、或者失败的一些信息）
-    //2 用户点击智能分析页的提交按钮时，先把图表立刻保存到数据库中，然后提交任务
-    //3 任务：先修改图表任务状态为 “执行中”。等执行成功后，修改为 “已完成”、保存执行结果；执行失败后，状态修改为 “失败”，记录任务失败信息。
-    //4 用户可以在图表管理页面查看所有图表（已生成的、生成中的、生成失败）的信息和状态 → (优化点)
-    //5 用户可以修改生成失败的图表信息，点击重新生成 → (优化点)
+    /*
+        1 给 chart 表新增任务状态字段（比如排队中、执行中、已完成、失败），任务执行信息字段（用于记录任务执行中、或者失败的一些信息）
+        2 用户点击智能分析页的提交按钮时，先把图表立刻保存到数据库中，然后提交任务
+        3 任务：先修改图表任务状态为 “执行中”。等执行成功后，修改为 “已完成”、保存执行结果；执行失败后，状态修改为 “失败”，记录任务失败信息。
+        4 用户可以在图表管理页面查看所有图表（已生成的、生成中的、生成失败）的信息和状态 → (优化点)
+        5 用户可以修改生成失败的图表信息，点击重新生成 → (优化点)
+    */
     /**
      *   智能分析(异步)
      *
@@ -483,7 +488,8 @@ public class ChartController {
             String[] splits = result.split("【【【【【");
             // 拆分之后还要进行校验
             if (splits.length < 3) {
-                throw new BusinessException(ErrorCode.SYSTEM_ERROR,"AI 生成错误");
+                handleChartUpdateError(chart.getId(),"AI 生成错误");
+                return;
             }
             String genChart = splits[1].trim();
             String genResult = splits[2].trim();
@@ -508,6 +514,101 @@ public class ChartController {
     }
 
 
+    /**
+     *   智能分析(异步消息队列)
+     *
+     * @param multipartFile
+     * @param genChartByAiRequest
+     * @param request
+     * @return
+     */
+    @PostMapping("/gen/async/mq")
+    public BaseResponse<BiResponse> genChartByAiAsyncMq(@RequestPart("file") MultipartFile multipartFile,
+                                                      GenChartByAiRequest genChartByAiRequest, HttpServletRequest request) {
+        String name = genChartByAiRequest.getName();
+        String goal = genChartByAiRequest.getGoal();
+        String chartType = genChartByAiRequest.getChartType();
+
+        // 校验
+        // 如果分析目标为空，就抛出请求参数错误异常，并给出提示
+        ThrowUtils.throwIf(StringUtils.isBlank(goal), ErrorCode.PARAMS_ERROR, "目标为空");
+        // 如果名称不为空，并且名称长度大于100，就抛出异常，并给出提示
+        ThrowUtils.throwIf(StringUtils.isNotBlank(name) && name.length() > 100, ErrorCode.PARAMS_ERROR, "名称过长");
+        // 检验文件
+        long size = multipartFile.getSize();
+        //取到原始文件名
+        String originalFilename = multipartFile.getOriginalFilename();
+        final long ONE_MB = 1024 * 1024L;
+        // 如果文件大小,大于一兆,就抛出异常,并提示文件超过1M
+        ThrowUtils.throwIf(size > ONE_MB, ErrorCode.PARAMS_ERROR, "文件超过 1M");
+        // 校验文件后缀(一般文件是aaa.png,我们要取到.<点>后面的内容)
+        String suffix = FileUtil.getSuffix(originalFilename);
+        //定义合法的后缀列表
+        final List<String> validFileSuffixList = Arrays.asList("xls", "xlsx");
+        // 如果suffix的后缀不在List的范围内,抛出异常,并提示'文件后缀非法'
+        ThrowUtils.throwIf(!validFileSuffixList.contains(suffix),ErrorCode.PARAMS_ERROR, "文件后缀非法");
+
+        // 通过response对象拿到用户id(必须登录才能使用)
+        User loginUser = userService.getLoginUser(request);
+
+        // 限流判断，每个用户一个限流器
+        redisLimiterManager.doRateLimit("genChartByAi_" + loginUser.getId());
+
+        // 指定一个模型id(把id写死，也可以定义成一个常量)
+        long biModelId = CommonConstant.BI_MODEL_ID;
+        /*
+        * 用户的输入(参考)
+          分析需求：
+          分析网站用户的增长情况
+          原始数据：
+          日期,用户数
+          1号,10
+          2号,20
+          3号,30
+        * */
+
+        // 构造用户输入
+        StringBuilder userInput = new StringBuilder();
+        userInput.append("分析需求：").append("\n");
+
+        // 拼接分析目标
+        String userGoal = goal;
+        // 如果图表类型不为空
+        if (StringUtils.isNotBlank(chartType)) {
+            // 就将分析目标拼接上“请使用”+图表类型
+            userGoal += "，请使用" + chartType;
+        }
+        userInput.append(userGoal).append("\n");
+        userInput.append("原始数据：").append("\n");
+        // 压缩后的数据（把multipartFile传进来）
+        String csvData = ExcelUtils.excelToCsv(multipartFile);
+        userInput.append(csvData).append("\n");
+
+        // 先把图表保存到数据库中
+        Chart chart = new Chart();
+        chart.setName(name);
+        chart.setGoal(goal);
+        chart.setChartData(csvData);
+        chart.setChartType(chartType);
+        // 插入数据库时,还没生成结束,把生成结果都去掉
+//        chart.setGenChart(genChart);
+//        chart.setGenResult(genResult);
+        // 设置任务状态为排队中
+        chart.setStatus("wait");
+        chart.setUserId(loginUser.getId());
+        boolean saveResult = chartService.save(chart);
+        ThrowUtils.throwIf(!saveResult, ErrorCode.SYSTEM_ERROR, "图表保存失败");
+        long newChartId = chart.getId();
+        // 在最终的返回结果前提交一个任务
+        // 处理任务队列满了后,抛异常的情况(因为提交任务报错了,前端会返回异常)
+        biMessageProducer.sendMessage(String.valueOf(newChartId));
+
+        BiResponse biResponse = new BiResponse();
+        biResponse.setChartId(chart.getId());
+        return ResultUtils.success(biResponse);
+    }
+
+
     // 上面的接口很多用到异常,直接定义一个工具类
     private void handleChartUpdateError(long chartId, String execMessage){
         Chart updateChartResult = new Chart();
@@ -519,6 +620,7 @@ public class ChartController {
             log.error("更新图表失败状态失败" + chartId + "," + execMessage);
         }
     }
+
     /**
      * 获取查询包装类
      *
